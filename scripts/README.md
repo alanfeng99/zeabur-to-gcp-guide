@@ -18,6 +18,7 @@
 | [`set-env.sh`](set-env.sh) | 本機（自己的終端機） | 替 `app-env` 補上 app 開機就要的變數（staging 值）：隱藏輸入，或 `--random` 隨機產生 | Secret Manager |
 | [`zeabur-git-trigger.py`](zeabur-git-trigger.py) | 本機 | 把服務的 Git 自動部署指向某個分支（停用／恢復）；`zeabur-lib.sh` 的 `git_trigger` 在沒有自動部署時跳過 | Zeabur 設定 |
 | [`zeabur-status.py`](zeabur-status.py) | 本機 | 印出服務狀態，全部 RUNNING 才以 0 結束 | 唯讀 |
+| [`zeabur-api-check.py`](zeabur-api-check.py) | 本機 | 確認上面幾支 Python 腳本的查詢、Zeabur CLI 背後的 restart／redeploy／suspend 用到的欄位與參數都還在（introspection，只讀 schema）；`cutover.sh` 動到 Zeabur 之前也會跑 | 唯讀 |
 | [`sync-env.sh`](sync-env.sh)＋[`build-app-env.py`](build-app-env.py) | 本機 | 每個 app 服務的環境變數合併、分類後寫進 Secret Manager（沿用 `init-secrets.sh` 的資料庫密碼與 GCS 金鑰）；加密金鑰另存並比對指紋。HOLD 的憑證（會對外發訊息的）只在 `--live` 時放正式值。之後要 `release.sh --deploy-only` 才生效 | Secret Manager |
 | [`sync-db.sh`](sync-db.sh)＋[`counts.sql`](counts.sql)＋[`restore-on-host.sh`](restore-on-host.sh) | 本機＋VM | dump、取回；VM 進 standby、換新的資料目錄（舊的改名保留）、還原、清 Redis；每張表筆數比對。`--dump-only` 只取回 dump（Phase 0 的備份）。切換後（有 live 標記）拒絕執行 | VM 上的資料庫 |
 | [`sync-volume.sh`](sync-volume.sh) | 本機＋VM | app 服務自己的 volume：容器內打包、取回、驗 SHA-256、解開到 VM 的資料碟，兩邊比對檔案數。`--fetch-only` 只取回 | VM 上的目錄 |
@@ -45,7 +46,7 @@ dump、取回的檔案與比對結果放在工作目錄 `$WORK`（預設 `~/.zea
 
 | 階段 | 腳本 |
 | --- | --- |
-| Phase 0 準備 | `zeabur-inventory.py`（看清楚帳號下有什麼）→ `zeabur-discover.py <專案>`（盤點表與適用性檢查）→ 備份：`sync-db.sh --dump-only`、`fetch-minio-data.sh`、`sync-volume.sh --fetch-only` |
+| Phase 0 準備 | `zeabur-api-check.py`（Zeabur 有沒有改版）→ `zeabur-inventory.py`（看清楚帳號下有什麼）→ `zeabur-discover.py <專案>`（盤點表與適用性檢查）→ 備份：`sync-db.sh --dump-only`、`fetch-minio-data.sh`、`sync-volume.sh --fetch-only` |
 | Phase 1 基礎建設 | [`../infra/`](../infra/)：`bootstrap.sh` → `check-placeholders.py infra/gcp` → `tf.sh plan` → `tf.sh apply` |
 | Phase 2 讓 VM 跑起來 | `init-secrets.sh` → `set-env.sh` → `cloudflare-access.py` → `setup-tunnel.sh` → `check-placeholders.py deploy infra/gcp` → `release.sh`（部署時開 `probe.sh`）→ 試跑 `backup.sh` → `verify-admin-block.sh` |
 | Phase 3 資料搬移與演練 | `sync-db.sh` → `sync-env.sh` → `release.sh --deploy-only` → `sync-volume.sh`／`sync-assets.sh --create-key`、`sync-assets.sh`、`--delete-key` → `verify.sh`，完整跑兩輪：第二輪就是切換的演練。`cutover.sh` 會暫停正式環境，不能拿來演練 |

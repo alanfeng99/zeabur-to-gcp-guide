@@ -52,6 +52,10 @@ fi
 ! grep -q "^die \"add your project's own checks" verify.sh || die "fill in step 3 of verify.sh first"
 echo "ok"
 
+step "Preflight: the Zeabur API still matches these scripts"
+# 切換與 rollback 用到的 Zeabur API（含 CLI 的 suspend／restart／redeploy）改版了就不要開始
+python3 -I zeabur-api-check.py || die "the Zeabur API changed or the login expired: see above"
+
 step "Preflight: the VM runs the latest secrets"
 # sync-env.sh 寫進 Secret Manager 的新值，要重新部署才會進到 VM 的 app.env
 deployed=$(gssh 'sudo stat -c %Y /srv/app/app.env' | tail -1 | tr -d '[:space:]')
