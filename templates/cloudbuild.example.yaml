@@ -1,0 +1,60 @@
+# 用 Cloud Build 建置 api、admin、web 三個 image，推上 Artifact Registry，同一個 tag。
+# scripts/release.sh 以 `git archive` 的 repo 根目錄當 source 送進來。
+#
+# NEXT_PUBLIC_API_URL 是真的建置參數，寫死在 Next.js 的 bundle 裡：只改執行期的環境變數
+# 沒有用。每個前端各自一個參數；後台用自己的網域，它的 API 呼叫才會在 Cloudflare Access 後面。
+# 改了網址就重新建置：檔名（content hash）會跟著變，瀏覽器與 CDN 的快取不會沿用舊檔。
+steps:
+  - id: api
+    name: gcr.io/cloud-builders/docker
+    env: [DOCKER_BUILDKIT=1]
+    args: [build, -f, <path/to/api/Dockerfile>, -t, "${_REPO}/api:${_TAG}", .]
+    waitFor: ["-"]
+
+  # 兩個 Next.js 建置一個接一個跑：各吃 2–3 GB，和 api 一起跑會擠爆 8 GB 的機器
+  - id: admin
+    name: gcr.io/cloud-builders/docker
+    env: [DOCKER_BUILDKIT=1]
+    args:
+      - build
+      - -f
+      - <path/to/admin/Dockerfile>
+      - --build-arg
+      - NEXT_PUBLIC_API_URL=${_ADMIN_API_URL}
+      - -t
+      - ${_REPO}/admin:${_TAG}
+      - .
+    waitFor: ["-"]
+
+  - id: web
+    name: gcr.io/cloud-builders/docker
+    env: [DOCKER_BUILDKIT=1]
+    args:
+      - build
+      - -f
+      - <path/to/web/Dockerfile>
+      - --build-arg
+      - NEXT_PUBLIC_API_URL=${_API_URL}
+      - -t
+      - ${_REPO}/web:${_TAG}
+      - .
+    waitFor: [admin]
+
+images:
+  - ${_REPO}/api:${_TAG}
+  - ${_REPO}/admin:${_TAG}
+  - ${_REPO}/web:${_TAG}
+
+substitutions:
+  _REPO: <region>-docker.pkg.dev/<gcp-project>/<repo>
+  _API_URL: https://api.example.com
+  _ADMIN_API_URL: https://admin.example.com
+  _TAG: ""
+
+options:
+  machineType: E2_HIGHCPU_8
+  # 用指定的服務帳號建置時必須設
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: MUST_MATCH
+
+timeout: 1800s

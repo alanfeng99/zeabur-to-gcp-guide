@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# 把 Zeabur 上的舊前台換成只做 302 轉址的小服務（templates/zeabur-redirect），路徑與參數保留，
+# 並停掉它們的自動部署（否則下次合併會蓋回去）。
+#
+# 只把前台的 API 網址指到新 API 不夠：Next.js 的 JS 檔快取一年，而網址是在容器啟動時
+# 改寫進去的、檔名不變，回訪者的瀏覽器會一直用快取裡呼叫舊 API 的那份。轉址讓他們到
+# 新網域重新載入。先用 302，確定不會 rollback 後再改 301。
+set -euo pipefail
+cd "$(dirname "$0")"
+source ./zeabur-lib.sh
+require ZEABUR_PROJECT_ID ZEABUR_ENV_ID ZEABUR_WEB_ID ZEABUR_ADMIN_ID GITHUB_REPO_ID OLD_WEB_URL OLD_ADMIN_URL NEW_WEB_URL NEW_ADMIN_URL
+REDIRECT_DIR=$(cd ../templates/zeabur-redirect && pwd)
+
+step "Stop the old frontends auto-deploying"
+python3 -I zeabur-git-trigger.py zeabur-decommissioned "$ZEABUR_WEB_ID" "$ZEABUR_ADMIN_ID"
+
+# 服務若設了 ZBPACK_DOCKERFILE_PATH，上傳的目錄裡 Dockerfile 要放在那個路徑：
+# 把 REDIRECT_DIR 的兩個檔案複製到對應位置再上傳。
+redirect() {
+  local id=$1 target=$2
+  step "$target"
+  zeabur variable create --id "$id" --env-id "$ZEABUR_ENV_ID" -k "REDIRECT_TO=$target" -y -i=false > /dev/null 2>&1 \
+    || zeabur variable update --id "$id" --env-id "$ZEABUR_ENV_ID" -k "REDIRECT_TO=$target" -y -i=false > /dev/null
+  (cd "$REDIRECT_DIR" && zeabur deploy --project-id "$ZEABUR_PROJECT_ID" --service-id "$id" --json -i=false)
+}
+redirect "$ZEABUR_WEB_ID" "$NEW_WEB_URL"
+redirect "$ZEABUR_ADMIN_ID" "$NEW_ADMIN_URL"
+
+# `zeabur deploy` 在上傳完成時就回報成功，不是建置完成：等轉址真的生效
+step "Wait for the redirects to go live"
+for _ in $(seq 1 30); do
+  web=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{redirect_url}' "$OLD_WEB_URL/" || true)
+  admin=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{redirect_url}' "$OLD_ADMIN_URL/" || true)
+  if [[ $web == "302 $NEW_WEB_URL/" && $admin == "302 $NEW_ADMIN_URL/" ]]; then
+    echo "live: $OLD_WEB_URL → $NEW_WEB_URL, $OLD_ADMIN_URL → $NEW_ADMIN_URL"
+    exit 0
+  fi
+  sleep 10
+done
+die "redirects not live after 5 minutes (web: $web, admin: $admin)"

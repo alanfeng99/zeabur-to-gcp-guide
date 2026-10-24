@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly database dump
+
+[Timer]
+# 台灣 03:30（排在每日磁碟快照之後）。
+# systemd 只認行首的 #：註解不能寫在值的後面，否則會變成值的一部分。
+OnCalendar=*-*-* 19:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

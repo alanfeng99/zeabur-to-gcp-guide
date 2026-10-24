@@ -1,0 +1,8 @@
+[Unit]
+Description=Dump the database to Cloud Storage
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/srv/app/backup.sh

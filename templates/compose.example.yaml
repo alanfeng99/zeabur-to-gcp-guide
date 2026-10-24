@@ -1,0 +1,264 @@
+# VM 上的整套服務（放在 /srv/app/compose.yaml），由 scripts/deploy.sh 驅動。
+# deploy.sh 會寫出旁邊兩個不進版控的檔案：
+#   .env      compose 變數：IMAGE_TAG、POSTGRES_PASSWORD、TUNNEL_TOKEN、COMPOSE_PROFILES
+#   app.env   api／worker 的執行環境（Secret Manager 的 app-env + encryption-key）
+#
+# 兩條進來的路，都經過 Traefik：
+#   web、api   網路 → VM :443（Traefik 自己的 Let's Encrypt 憑證）。不經 Cloudflare 代理：
+#              Cloudflare 免費方案會把台灣部分 ISP 的流量繞到美國
+#   admin      Cloudflare Access → tunnel → cloudflared → Traefik 的內部 `web` 入口（網路連不到）。
+#              後台自己的 /api 走同一條路；公開的 api 網域拒絕 /api/admin
+# 只有 Traefik 對外開 port。docker rollout 換的服務不能開 port 到主機、也不能設 container_name。
+#
+# 每個 <...> 換成自己的值；api、web、admin 的 port 與 healthcheck 路徑依專案調整。
+name: app
+
+x-node: &node
+  # tini 當 PID 1，SIGTERM 才會送到程式，優雅關機才會跑
+  init: true
+  restart: unless-stopped
+  networks: [app]
+
+x-api-env: &api-env
+  # 在這裡組，資料庫密碼只存在一個地方
+  DATABASE_URL: postgresql://app:${POSTGRES_PASSWORD}@postgres:5432/app?schema=public
+  REDIS_URL: redis://redis:6379
+  # migration 只在部署時的 migrate 服務跑一次，不在開機時跑
+  RUN_MIGRATIONS: "false"
+
+# 不停機換版：docker rollout 停舊容器前先跑 pre-stop hook，建立 /tmp/drain 讓 healthcheck
+# 失敗，Traefik 不再送新請求，進行中的請求做完才收到 SIGTERM。
+# healthcheck 用 bash 的 /dev/tcp：精簡 image 沒有 curl 與 wget。
+x-health: &health
+  interval: 3s
+  timeout: 2s
+  retries: 2
+  start_period: 90s
+  start_interval: 2s
+
+x-drain: &drain
+  docker-rollout.pre-stop-hook: touch /tmp/drain && sleep 10
+
+services:
+  # --- 入口 ----------------------------------------------------------------
+  # 一個 tunnel 兩個連線：其中一個重啟或升級時另一個繼續服務。
+  # 有 tunnel token 時才啟動（deploy.sh 設 COMPOSE_PROFILES=tunnel）。
+  cloudflared:
+    image: cloudflare/cloudflared:<version>
+    command: tunnel --no-autoupdate run --url http://traefik:80
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+    networks: [app]
+    profiles: [tunnel]
+
+  traefik:
+    image: traefik:v3.7.14
+    ports:
+      - "443:443"
+      # 主機 :80 是 public-http，只做 http → https。絕不開容器的 :80：那是內部入口，
+      # 開出去後台就能繞過 Cloudflare Access
+      - "80:8081"
+    command:
+      - --providers.docker.endpoint=tcp://socket-proxy:2375
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=app_app
+      # 內部入口（不對外）：tunnel 進來的路。也是沒寫 entrypoint 的路由的預設值，
+      # 忘了寫的路由一律留在內部，不會跑到公開的 :443
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.asdefault=true
+      # 保留 cloudflared 送來的 X-Forwarded-For；不設的話後台流量全部變成 cloudflared 的位址
+      - --entrypoints.web.forwardedheaders.trustedips=172.30.0.0/24
+      # 公開入口：不信任外來的 X-Forwarded-For，一律換成實際連進來的位址
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.public-http.address=:8081
+      - --entrypoints.public-http.http.redirections.entrypoint.to=websecure
+      - --entrypoints.public-http.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+      # rollout 期間 Traefik 還可能送到剛移除的容器；連不上時 1 秒就放棄，交給 retry
+      - --serverstransport.forwardingtimeouts.dialtimeout=1s
+      - --providers.providersthrottleduration=500ms
+      # 不重用到後端的連線：送進正要關閉的連線會回 502 而且不重試
+      - --serverstransport.maxidleconnsperhost=-1
+      - --ping=true
+      - --log.level=WARN
+    volumes:
+      - /srv/data/traefik:/acme
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    depends_on: [socket-proxy]
+    restart: unless-stopped
+    networks: [app, docker-api]
+
+  # Traefik 透過這個唯讀 proxy 讀 Docker，而不是直接掛 docker.sock
+  socket-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    environment:
+      CONTAINERS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    networks: [docker-api]
+
+  # --- 應用程式 --------------------------------------------------------------
+  api:
+    <<: *node
+    image: <region>-docker.pkg.dev/<gcp-project>/<repo>/api:${IMAGE_TAG:?}
+    env_file: app.env
+    environment:
+      <<: *api-env
+      # 公開網域經過一層 proxy（Traefik），後台網域經過兩層（cloudflared、Traefik）。
+      # app-env 的 TRUST_PROXY_HOPS=1 處理前者；這個讓 app 也信任私有網段的 proxy
+      # （templates/trust-proxy.ts，需要程式支援）
+      TRUST_PRIVATE_PROXIES: "true"
+    healthcheck:
+      <<: *health
+      # 健康檢查端點在資料庫掛掉時可能仍回 200，所以檢查回應內容
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          [ ! -f /tmp/drain ]
+          && exec 3<>/dev/tcp/127.0.0.1/4000
+          && printf "GET /api/health HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3
+          && grep -q '"status":"ok"' <&3
+    labels:
+      <<: *drain
+      traefik.enable: "true"
+      # 公開：除了後台 API 以外的全部。不分大小寫、容許連續斜線，因為 Express 會把
+      # /API/Admin、/api//admin 也路由到後台（Traefik 比對的是解碼、整理過的路徑）。
+      # 規則改了就換路由名稱：rollout 時新舊容器同時存在，同名不同設定的路由會被丟掉
+      traefik.http.routers.api-public.rule: Host(`api.example.com`) && !PathRegexp(`(?i)^/+api/+admin`)
+      traefik.http.routers.api-public.entrypoints: websecure
+      traefik.http.routers.api-public.tls.certresolver: le
+      traefik.http.routers.api-public.middlewares: api-retry
+      # 後台自己網域的 /api：只在內部入口，和後台頁面一樣在 Cloudflare Access 後面
+      traefik.http.routers.admin-api.rule: Host(`admin.example.com`) && PathPrefix(`/api`)
+      traefik.http.routers.admin-api.entrypoints: web
+      traefik.http.routers.admin-api.service: api
+      traefik.http.routers.admin-api.middlewares: api-retry
+      traefik.http.middlewares.api-retry.retry.attempts: "3"
+      traefik.http.middlewares.api-retry.retry.initialinterval: 100ms
+      traefik.http.services.api.loadbalancer.server.port: "4000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    <<: *node
+    image: <region>-docker.pkg.dev/<gcp-project>/<repo>/api:${IMAGE_TAG:?}
+    env_file: app.env
+    environment:
+      <<: *api-env
+    command: ["<start-the-worker>"]
+    # 讓手上的 job 做完再停
+    stop_grace_period: 60s
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  # 一次性：只由 deploy.sh 以 `docker compose run --rm migrate` 執行
+  migrate:
+    <<: *node
+    image: <region>-docker.pkg.dev/<gcp-project>/<repo>/api:${IMAGE_TAG:?}
+    env_file: app.env
+    environment:
+      <<: *api-env
+    command: ["sh", "-c", "<run-migrations-and-seed>"]
+    restart: "no"
+    profiles: [tools]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  web:
+    <<: *node
+    image: <region>-docker.pkg.dev/<gcp-project>/<repo>/web:${IMAGE_TAG:?}
+    environment:
+      PORT: "3000"
+    healthcheck: &next-health
+      <<: *health
+      # 檢查一個靜態檔：比每 3 秒渲染一次頁面便宜
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          [ ! -f /tmp/drain ]
+          && exec 3<>/dev/tcp/127.0.0.1/3000
+          && printf "GET /favicon.ico HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3
+          && head -1 <&3 | grep -q " 200 "
+    labels:
+      <<: *drain
+      traefik.enable: "true"
+      traefik.http.routers.web.rule: Host(`www.example.com`)
+      traefik.http.routers.web.entrypoints: websecure
+      traefik.http.routers.web.tls.certresolver: le
+      traefik.http.routers.web.middlewares: web-retry
+      traefik.http.middlewares.web-retry.retry.attempts: "3"
+      traefik.http.middlewares.web-retry.retry.initialinterval: 100ms
+      traefik.http.services.web.loadbalancer.server.port: "3000"
+
+  admin:
+    <<: *node
+    image: <region>-docker.pkg.dev/<gcp-project>/<repo>/admin:${IMAGE_TAG:?}
+    environment:
+      PORT: "3000"
+    healthcheck: *next-health
+    labels:
+      <<: *drain
+      traefik.enable: "true"
+      traefik.http.routers.admin.rule: Host(`admin.example.com`)
+      # 只在內部入口，絕不掛 websecure：否則直連 VM 的位址就能繞過 Cloudflare Access
+      traefik.http.routers.admin.entrypoints: web
+      traefik.http.routers.admin.middlewares: admin-retry
+      traefik.http.middlewares.admin-retry.retry.attempts: "3"
+      traefik.http.middlewares.admin-retry.retry.initialinterval: 100ms
+      traefik.http.services.admin.loadbalancer.server.port: "3000"
+
+  # --- 資料（放在獨立的資料碟 /srv/data）---------------------------------------
+  postgres:
+    image: postgres:<same-major-version-as-zeabur>
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_DB: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - /srv/data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [app]
+
+  redis:
+    image: redis:7-alpine
+    # 佇列用 Redis 一定要 noeviction：記憶體不夠時寧可報錯，也不要默默丟掉 job
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - /srv/data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [app]
+
+networks:
+  app:
+    ipam:
+      config:
+        # 固定網段，Traefik 的 forwardedheaders.trustedips 才能寫死
+        - subnet: 172.30.0.0/24
+  docker-api:
+    internal: true

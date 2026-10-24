@@ -1,0 +1,17 @@
+# 搬遷過程中產生的資料與 secret：絕不進版控
+*.dump
+*.gpg
+*.key
+*.tgz
+app.env
+.env
+zeabur-env.json
+keys.txt
+*-counts.txt
+minio-files.txt
+local-files.txt
+listed-files.txt
+minio/
+verify/
+
+.DS_Store
