@@ -34,6 +34,7 @@ agent 會：
 | [`infra/`](infra/) | Terraform：VM、資料碟與每日快照、只走 IAP 的 SSH、固定 IP、Artifact Registry、只能寫入的備份 bucket、Cloud Build 服務帳號、Secret Manager、預算警示；VM 開機腳本 |
 | [`scripts/`](scripts/) | 每個步驟用到的腳本：盤點與適用性檢查、資料庫搬移與逐表比對、環境變數與金鑰指紋、物件複製、部署與回滾、每晚備份、切換、轉址、最後的加密封存、Cloudflare Access。[一覽與使用順序](scripts/README.md) |
 | [`templates/`](templates/) | VM 上的 `compose.yaml`（Traefik 零停機設定、路由）、Cloud Build、systemd 備份 timer、舊網址轉址服務、真實 IP 的 `trust proxy` 函式 |
+| [`tests/`](tests/) | 這個 repo 自己的檢查：`tests/run.sh`（見「參與」） |
 
 ## 自己來
 
@@ -59,7 +60,7 @@ agent 會：
 ## 適用範圍與現況
 
 - **涵蓋**：由原始碼建置的 Node／Next.js 類 app、Postgres、Redis、MinIO（或其他 S3 相容儲存），搬到單台 VM。其他組合（MySQL／MariaDB、MongoDB、WordPress、Cloud Run、Cloud SQL）`zeabur-discover.py` 會標出來，要自己調整。
-- **驗證程度**：整套流程在一次實際搬遷中跑過；這裡是去識別化之後的版本，唯讀的腳本（盤點、探測、封鎖驗證）與 Terraform 的 `validate` 都實際跑過，所有腳本通過 `bash -n`、shellcheck 與語法檢查。會改變東西的腳本在去識別化後還沒有對真實服務完整跑過一輪：第一次使用時請在 Phase 3 照常演練兩輪，有問題請回報。
+- **驗證程度**：整套流程在一次實際搬遷中跑過；這裡是去識別化之後的版本，唯讀的腳本（盤點、探測、封鎖驗證）都實際跑過。[`tests/run.sh`](tests/run.sh) 檢查語法、shellcheck、Terraform、compose、環境變數的分類，把檔案複製成模擬的使用者專案跑佔位值檢查與設定錯誤時的停止點，並在 Debian、Alpine、Postgres 容器裡實際跑 dump、打包與解開的指令。會改變東西的腳本在去識別化後還沒有對真實服務完整跑過一輪：第一次使用時請在 Phase 3 照常演練兩輪，有問題請回報。
 
 ## 前置需求
 
@@ -71,6 +72,15 @@ agent 會：
 ## 參與
 
 歡迎開 issue 或 PR：補充其他架構的做法、修正過時的指令、分享新的陷阱。請保持內容與特定專案無關：範例一律用 `example.com` 與 `<...>` 佔位，不要放任何真實的 ID、網域或金鑰。
+
+發 PR 前在本機跑一次，全部通過才發（要 Docker，不會連到 Zeabur 或 GCP）：
+
+```bash
+tests/run.sh                # 全部，約一分鐘
+tests/run.sh static unit    # 只跑其中幾段：static、unit、layout、container、docs
+```
+
+改了腳本裡被測的那幾行（容器內的 dump 與打包、VM 上的解開、檢查的停止點），測試會直接取出新的寫法來跑；改了訊息文字，`tests/run.sh` 裡對應的預期也要一起改。`main` 受保護，改動一律走 PR。
 
 ## 授權
 
@@ -89,3 +99,5 @@ A field guide and toolkit for moving a web app from Zeabur to Google Cloud: fron
 - [`scripts/`](scripts/) and [`templates/`](templates/): every script and config used in the migration, sanitized.
 
 Replace every `<...>` with your own values. Scripts that change production say so at the top; rehearse on staging first.
+
+Contributing: run [`tests/run.sh`](tests/run.sh) before opening a PR (needs Docker; it never touches Zeabur or GCP). `main` only accepts pull requests.

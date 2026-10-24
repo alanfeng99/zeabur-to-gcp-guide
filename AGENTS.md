@@ -269,3 +269,8 @@ Zeabur 從某個分支（`ZEABUR_GIT_BRANCH`，discover 會列出）自動部署
 ## 腳本有問題時
 
 改使用者專案裡的那一份，並告訴使用者可以回報到這個 repo（開 issue 或 PR）。回報時不要附上任何真實的 ID、網域或金鑰。
+
+## 改這個 repo 本身
+
+使用者要你修改這個 repo（而不是帶使用者遷移）時：改完跑 `tests/run.sh`，全部通過才發 PR；`main` 受保護，只能走 PR。
+範例只用 `example.com` 與 `<...>`，`tests/run.sh docs` 會擋公開 IP、24 碼 ID 與 email，專案名稱與網域要自己再 grep 一次。
