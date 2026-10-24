@@ -1,6 +1,6 @@
 # 切換後取代 Zeabur 上的舊前台：每個請求都 302 到新網域的同一頁，路徑與參數保留
 # （REDIRECT_TO 在各 Zeabur 服務上設定）。用 302 而不是 301：瀏覽器不會快取，
-# 還能 rollback；確定不會退回後再改 301。
+# 還能 rollback；確定不會退回後改成 301，再跑一次 retire-zeabur-frontends.sh（它照這一行的碼檢查）。
 {
 	auto_https off
 	admin off

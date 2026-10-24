@@ -8,13 +8,13 @@
 # cloudbuild.yaml 放在 deploy/，VM 上的檔案全部平放在 deploy/host/：compose.yaml、
 # deploy.sh、backup.sh、db-backup.service、db-backup.timer（deploy.sh 從同一個目錄安裝
 # systemd 單元）。路徑不同就改下面兩處。
-# 合併到 main 不會自動部署：上線一律跑這支。
+# 合併到 main 不會自動部署：上線一律跑這支。新增或修改的 deploy/ 檔案要先 commit 才會被帶上去。
 set -euo pipefail
 PROJECT='<gcp-project>'
 REGION='<region>'
 ZONE='<zone>'
 HOST='<vm-name>'
-BUILD_SA="<build-service-account>@$PROJECT.iam.gserviceaccount.com"
+BUILD_SA='<build-service-account-email>'   # infra/gcp/tf.sh output build_service_account（完整的 email）
 
 ROOT=$(git rev-parse --show-toplevel)
 TMP=$(mktemp -d)
@@ -22,6 +22,9 @@ trap 'rm -rf "$TMP"' EXIT
 
 if [ "${1:-}" = "--deploy-only" ]; then
   TAG=${2:?usage: release.sh --deploy-only <tag>}
+  if [ -n "$(git -C "$ROOT" status --porcelain -- deploy/host)" ]; then
+    echo "note: uncommitted changes in deploy/host are not deployed (HEAD:deploy/host is)" >&2
+  fi
 else
   TAG=$(git -C "$ROOT" rev-parse --short=12 HEAD)
   if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then

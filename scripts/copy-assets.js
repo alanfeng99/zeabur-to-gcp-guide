@@ -1,6 +1,8 @@
 // 在 Zeabur 的 API 容器裡執行（由 sync-assets.sh 帶進去）：把 MinIO bucket 裡的每個物件
 // 複製到 GCS，key 不變；GCS 上已有同大小的就跳過，所以可以重跑。
-// S3_* 是 API 容器原本的 MinIO 設定；DEST_* 是只對 assets bucket 有權限的暫時 HMAC 金鑰。
+// S3_* 是 API 容器原本的 MinIO 設定（你的 app 用別的名稱，例如 MINIO_*、AWS_*，就改下面的
+// process.env.*）；DEST_* 是只對 assets bucket 有權限的暫時 HMAC 金鑰。用的是 app 自己的 minio
+// 套件：app 用 @aws-sdk 之類的就改寫成那個套件。
 // 只印統計數字；失敗時物件名稱只留前綴。
 const { Client } = require('/app/node_modules/minio'); // 路徑依 image 調整
 const src = new Client({ endPoint: process.env.S3_ENDPOINT, port: +process.env.S3_PORT, useSSL: process.env.S3_USE_SSL === 'true', accessKey: process.env.S3_ACCESS_KEY, secretKey: process.env.S3_SECRET_KEY });

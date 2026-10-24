@@ -28,7 +28,10 @@ x-api-env: &api-env
 
 # 不停機換版：docker rollout 停舊容器前先跑 pre-stop hook，建立 /tmp/drain 讓 healthcheck
 # 失敗，Traefik 不再送新請求，進行中的請求做完才收到 SIGTERM。
-# healthcheck 用 bash 的 /dev/tcp：精簡 image 沒有 curl 與 wget。
+# healthcheck 用 bash 的 /dev/tcp：精簡 image 沒有 curl 與 wget。image 是 alpine（沒有 bash）
+# 的話，改成 `node -e` 打 fetch，或在 Dockerfile 裡裝 bash。
+# app 的 image 要符合：api 在 4000 回應 /api/health 且內容含 "status":"ok"；web 與 admin 在
+# 3000 回應 /favicon.ico 200。不一樣就改下面的 port 與路徑。
 x-health: &health
   interval: 3s
   timeout: 2s
@@ -76,6 +79,11 @@ services:
       - --entrypoints.public-http.address=:8081
       - --entrypoints.public-http.http.redirections.entrypoint.to=websecure
       - --entrypoints.public-http.http.redirections.entrypoint.scheme=https
+      # TLS-ALPN 要等 DNS 指到這台 VM 才簽得到憑證。正式網域切換前還指向 Zeabur（切換當晚只改
+      # DNS）時，改用 DNS-01，憑證在切換前就簽好：把下一行換成
+      #   - --certificatesresolvers.le.acme.dnschallenge.provider=cloudflare
+      # 並給 traefik 一個 CF_DNS_API_TOKEN（只對該 zone 有 DNS:Edit），值放 Secret Manager、
+      # 由 deploy.sh 寫進 .env。這條路還沒有完整實跑過：先用測試網域驗證。
       - --certificatesresolvers.le.acme.tlschallenge=true
       - --certificatesresolvers.le.acme.storage=/acme/acme.json
       # rollout 期間 Traefik 還可能送到剛移除的容器；連不上時 1 秒就放棄，交給 retry
@@ -117,6 +125,10 @@ services:
       # app-env 的 TRUST_PROXY_HOPS=1 處理前者；這個讓 app 也信任私有網段的 proxy
       # （templates/trust-proxy.ts，需要程式支援）
       TRUST_PRIVATE_PROXIES: "true"
+    # app 在 Zeabur 上自己掛了 volume（例如上傳的檔案）時：sync-volume.sh 把它搬到 VM 的
+    # 資料碟，這裡再掛回容器裡原本的路徑（zeabur-lib.sh 的 VOLUMES 要一致）
+    # volumes:
+    #   - /srv/data/media:/data/media
     healthcheck:
       <<: *health
       # 健康檢查端點在資料庫掛掉時可能仍回 200，所以檢查回應內容
@@ -182,6 +194,10 @@ services:
     image: <region>-docker.pkg.dev/<gcp-project>/<repo>/web:${IMAGE_TAG:?}
     environment:
       PORT: "3000"
+      # Next.js standalone 預設只聽 HOSTNAME，而 Docker 把 HOSTNAME 設成容器 ID：不設的話
+      # 127.0.0.1 的 healthcheck 連不上
+      HOSTNAME: "0.0.0.0"
+    # 要執行期的環境變數（不是 NEXT_PUBLIC_*，那些在建置時寫死）就加 env_file: app.env
     healthcheck: &next-health
       <<: *health
       # 檢查一個靜態檔：比每 3 秒渲染一次頁面便宜
@@ -210,6 +226,7 @@ services:
     image: <region>-docker.pkg.dev/<gcp-project>/<repo>/admin:${IMAGE_TAG:?}
     environment:
       PORT: "3000"
+      HOSTNAME: "0.0.0.0"
     healthcheck: *next-health
     labels:
       <<: *drain
@@ -241,8 +258,12 @@ services:
     networks: [app]
 
   redis:
+    # 和 Zeabur 用同一個 image。佇列用 Redis 一定要 noeviction：記憶體不夠時寧可報錯，
+    # 也不要默默丟掉 job。
+    # redis-stack 系列的 entrypoint 不吃 command（覆寫的話模組不會載入）：改用
+    #   environment: { REDIS_ARGS: "--appendonly yes --maxmemory-policy noeviction" }
+    # 並拿掉下面的 command。
     image: redis:7-alpine
-    # 佇列用 Redis 一定要 noeviction：記憶體不夠時寧可報錯，也不要默默丟掉 job
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     volumes:
       - /srv/data/redis:/data

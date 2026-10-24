@@ -1,0 +1,82 @@
+#!/bin/bash
+# GCE startup script: runs as root on every boot, so every step is idempotent.
+# Rendered by Terraform (templatefile); only ar_host and swap_gb are template
+# variables. Output lands in `journalctl -u google-startup-scripts`.
+set -euo pipefail
+
+DATA_DEV=/dev/disk/by-id/google-data
+DATA_MNT=/srv
+
+# 1. Persistent data disk: format once, mount on every boot.
+if ! blkid "$DATA_DEV" >/dev/null 2>&1; then
+  mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$DATA_DEV"
+fi
+mkdir -p "$DATA_MNT"
+if ! grep -q " $DATA_MNT " /etc/fstab; then
+  echo "UUID=$(blkid -s UUID -o value "$DATA_DEV") $DATA_MNT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+fi
+mountpoint -q "$DATA_MNT" || mount "$DATA_MNT"
+mkdir -p "$DATA_MNT/data" "$DATA_MNT/app"
+
+# 2. Swap on the boot disk, as headroom against memory spikes.
+if [ ! -f /swapfile ]; then
+  fallocate -l ${swap_gb}G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  echo "/swapfile none swap sw 0 0" >> /etc/fstab
+fi
+swapon --show | grep -q /swapfile || swapon /swapfile
+
+# 3. Security updates.
+if ! dpkg -s unattended-upgrades >/dev/null 2>&1; then
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades
+fi
+
+# 4. Docker Engine + compose plugin, from Docker's own apt repository.
+if ! command -v docker >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y ca-certificates curl
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  . /etc/os-release
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $VERSION_CODENAME stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+fi
+
+# Container logs go to journald, which the Ops Agent ships to Cloud Logging.
+# journald (not gcplogs) so a Logging outage can never stop a container starting.
+# Docker Hub pulls go through Google's mirror first: anonymous Hub pulls are
+# rate-limited per IP, and every pull from this host shares the one NAT IP.
+DAEMON_JSON='{ "log-driver": "journald", "live-restore": true, "registry-mirrors": ["https://mirror.gcr.io"] }'
+if [ "$(cat /etc/docker/daemon.json 2>/dev/null)" != "$DAEMON_JSON" ]; then
+  mkdir -p /etc/docker
+  echo "$DAEMON_JSON" > /etc/docker/daemon.json
+  systemctl restart docker
+fi
+
+# 5. Ops Agent: memory/disk metrics and the journald logs above.
+if ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
+  curl -fsSL -o /tmp/add-google-cloud-ops-agent-repo.sh https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+  bash /tmp/add-google-cloud-ops-agent-repo.sh --also-install
+fi
+OPS_CONFIG='logging:
+  receivers:
+    journald:
+      type: systemd_journald
+  service:
+    pipelines:
+      journald:
+        receivers: [journald]'
+if [ "$(cat /etc/google-cloud-ops-agent/config.yaml 2>/dev/null)" != "$OPS_CONFIG" ]; then
+  echo "$OPS_CONFIG" > /etc/google-cloud-ops-agent/config.yaml
+  systemctl restart google-cloud-ops-agent
+fi
+
+# 6. Let root's docker pull from Artifact Registry with the VM's service account.
+gcloud auth configure-docker ${ar_host} --quiet
+
+echo "host setup complete"

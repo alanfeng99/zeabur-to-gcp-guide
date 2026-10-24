@@ -1,0 +1,8 @@
+# 複製成 terraform.tfvars 再填（terraform.tfvars 不進版控）。
+project_id      = "<project-id>"
+billing_account = "<billing-account-id>"
+name            = "<app-name>"
+
+# 單機方案約 US$40／月；警示設在略高於預估的地方
+budget_amount   = 60
+budget_currency = "USD"

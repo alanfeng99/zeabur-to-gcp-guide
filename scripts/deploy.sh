@@ -34,12 +34,14 @@ fi
 
 # 2. secrets → app.env（api／worker 的執行環境）與 .env（compose 的變數），權限 600
 umask 077
+# app 讀加密金鑰的變數名稱：和 zeabur-lib.sh 的 ENCRYPTION_KEY_VAR 相同（沒有加密金鑰就留空）
+ENCRYPTION_KEY_VAR=ENCRYPTION_KEY
 # 單獨一行：寫在 echo 的參數裡，$(...) 失敗不會觸發 set -e，會寫出空的金鑰
 ENCRYPTION_KEY=$(secret encryption-key)
 {
   secret app-env
   echo
-  echo "ENCRYPTION_KEY=$ENCRYPTION_KEY"
+  [ -z "$ENCRYPTION_KEY_VAR" ] || echo "$ENCRYPTION_KEY_VAR=$ENCRYPTION_KEY"
 } > app.env.new
 mv app.env.new app.env
 

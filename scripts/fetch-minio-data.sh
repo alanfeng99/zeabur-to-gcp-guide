@@ -2,18 +2,20 @@
 # 最後封存的第一步：把 Zeabur 上 MinIO 的整個 /data 目錄（後端格式：xl.meta、part.1）
 # 逐檔取回到 <工作目錄>/minio，每個檔案都比對容器內算好的 SHA-256。可重跑。
 #
-#   ./fetch-minio-data.sh <工作目錄>
+#   ./fetch-minio-data.sh [工作目錄]        # 預設是 zeabur-lib.sh 的 $WORK
 #
 # MinIO 的 image 沒有 tar、gzip、find，所以用 sh 走目錄。`.minio.sys` 裡的 usage、bloom、
 # heal 檔一直在變，取回後 checksum 一定對不上，要排除。還原時用 `minio server <目錄>` 開起來。
 set -euo pipefail
 umask 077
-# 在 cd 之前轉成絕對路徑：相對路徑以執行時所在的目錄為準，和 final-archive.sh 一致
-WORK=$(mkdir -p "${1:?usage: fetch-minio-data.sh <work-dir>}" && cd "$1" && pwd)
+# 在 cd 之前轉成絕對路徑：相對路徑以執行時所在的目錄為準
+ARG_WORK=${1:+$(mkdir -p "$1" && cd "$1" && pwd)}
 cd "$(dirname "$0")"
 source ./zeabur-lib.sh
 source ./fetch-file.sh
 require ZEABUR_MINIO_ID ZEABUR_ENV_ID
+WORK=${ARG_WORK:-$WORK}
+work_dir
 mkdir -p "$WORK/minio"
 
 step "List every file with its size and SHA-256"

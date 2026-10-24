@@ -13,5 +13,14 @@ local-files.txt
 listed-files.txt
 minio/
 verify/
+volumes/
+restore.log
+inventory.md
 
 .DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars

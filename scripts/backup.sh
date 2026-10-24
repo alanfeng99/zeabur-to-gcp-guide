@@ -5,8 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-DB_USER='<db-user>'
-DB_NAME='<db-name>'
+# 和 compose.yaml 的 POSTGRES_USER／POSTGRES_DB 相同（範本是 app／app）
+DB_USER=app
+DB_NAME=app
 
 METADATA=http://metadata.google.internal/computeMetadata/v1
 PROJECT=$(curl -fsS -H 'Metadata-Flavor: Google' "$METADATA/project/project-id")
