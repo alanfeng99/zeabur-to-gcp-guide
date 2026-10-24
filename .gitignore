@@ -24,3 +24,6 @@ inventory.md
 *.tfstate
 *.tfstate.*
 terraform.tfvars
+
+# Python
+__pycache__/

@@ -4,7 +4,7 @@
 #   tests/run.sh                      全部
 #   tests/run.sh static unit …        只跑其中幾段：
 #     static     bash -n（本機的 bash 與 bash 5）、shellcheck、Python 與 JS 語法、Terraform、compose
-#     unit       build-app-env.py：分類、HOLD 與 --live、錯誤訊息不含值
+#     unit       build-app-env.py：分類、HOLD 與 --live、錯誤訊息不含值；zeabur-api-check.py 對假的 schema
 #     layout     照 AGENTS.md 複製成模擬的使用者專案：佔位值檢查、設定錯了要在動到 Zeabur 之前就停
 #     container  在 Debian、Alpine、Postgres 容器裡實際跑 dump、打包、VM 上解開與計數的那幾行
 #     docs       文件的相對連結與錨點、不該公開的識別資訊
@@ -221,6 +221,74 @@ unit_missing_keep() {
   has 'POSTGRES_PASSWORD'
 }
 
+# --- unit：zeabur-api-check.py（假的 schema，不連網路） ---------------------------
+# fake_schema [--without <路徑>]…：剛好符合 --required 的 schema，再拿掉指定的部分
+fake_schema() {
+  python3 -I scripts/zeabur-api-check.py --required | python3 -I tests/fake_zeabur_schema.py "$@" > "$T/schema.json"
+}
+api_check() { python3 -I scripts/zeabur-api-check.py --schema "$T/schema.json"; }
+
+unit_api_sources() {
+  succeeds python3 -I scripts/zeabur-api-check.py --required
+  for q in zeabur-discover.py:PROJECTS zeabur-discover.py:SERVICE zeabur-status.py:STATUS zeabur-git-trigger.py:READ \
+    zeabur-git-trigger.py:UPDATE zeabur-inventory.py:PROJECTS zeabur-inventory.py:STATUS 'Zeabur CLI'; do
+    has "\"$q\""
+  done
+}
+unit_api_matches() {
+  fake_schema
+  succeeds api_check
+  ends 'ok: all 8 queries and their fields still match the Zeabur API'
+}
+unit_api_field_gone() {
+  fake_schema --without Query.service.gitTrigger --without Query.service.volumes.usage
+  fails api_check
+  line 'Query.service.gitTrigger: field is gone  (zeabur-git-trigger.py:READ)'
+  line 'Query.service.volumes.usage: field is gone  (zeabur-discover.py:SERVICE)'
+}
+unit_api_argument_gone() {
+  fake_schema --without 'Query.service.status(environmentID)'
+  fails api_check
+  line 'Query.service.status: argument environmentID is gone  (zeabur-status.py:STATUS)'
+}
+unit_api_cli_mutation_gone() {
+  fake_schema --without Mutation.suspendService
+  fails api_check
+  line 'Mutation.suspendService: field is gone  (Zeabur CLI)'
+}
+unit_api_input_gone() {
+  fake_schema --without TriggerInput.branchName
+  fails api_check
+  line 'TriggerInput.branchName: input field is gone'
+}
+unit_api_type_gone() {
+  fake_schema --without ObjectID
+  fails api_check
+  line 'ObjectID: type is gone  (zeabur-git-trigger.py:UPDATE)'
+}
+# 以後有人加的具名查詢（query Name(...)）也要被讀到，不能默默略過
+unit_api_named_query() {
+  mkdir "$T/api-src"
+  cp scripts/zeabur-*.py "$T/api-src/"
+  echo "EXTRA = 'query Extra(\$id: ObjectID!) { service(_id: \$id) { name } }'" >> "$T/api-src/zeabur-status.py"
+  succeeds python3 -I "$T/api-src/zeabur-api-check.py" --required
+  has '"zeabur-status.py:EXTRA"'
+}
+# zeabur_token() 與 gql() 每支腳本各一份（python3 -I 不能 import 同目錄的檔案），內容必須一模一樣
+unit_api_shared_blocks() {
+  succeeds python3 -I - scripts/zeabur-{discover,status,git-trigger,inventory,api-check}.py <<'PY'
+import ast, sys
+for fn, paths in (('zeabur_token', sys.argv[1:]), ('gql', sys.argv[1:-1])):
+    seen = {}
+    for path in paths:
+        src = open(path, encoding='utf-8').read()
+        seen.setdefault(next(ast.get_source_segment(src, n) for n in ast.parse(src).body
+                             if isinstance(n, ast.FunctionDef) and n.name == fn), []).append(path)
+    if len(seen) > 1:
+        sys.exit(f'{fn}() differs: ' + ' | '.join(', '.join(p) for p in seen.values()))
+PY
+}
+
 # --- layout：模擬的使用者專案 -------------------------------------------------
 # 照 AGENTS.md「檔案放在使用者的專案裡」複製；minimal 是沒有 MinIO、volume、Access 的專案
 make_layout() {
@@ -234,6 +302,7 @@ make_layout() {
   cp -p scripts/deploy.sh scripts/backup.sh templates/systemd/* "$u/deploy/host/"
   cp -pR templates/zeabur-redirect "$u/deploy/templates/"
   for f in scripts/*; do
+    [ -f "$f" ] || continue
     b=${f##*/}
     case $b in release.sh | deploy.sh | backup.sh | README.md) continue ;; esac
     if [ "$2" = minimal ]; then
@@ -275,8 +344,9 @@ exit 97
 EOF
   chmod +x "$T/stub/curl" "$T/stub/gcloud" "$T/stub/npx"
 }
-# 在假的 gcloud、npx、curl 之下跑；npx（也就是 Zeabur CLI）被叫到的話會記在 $T/calls.log
-stubbed() { PATH="$T/stub:$PATH" STUB_LOG="$T/calls.log" MIGRATION_WORK="$T/work" "$@"; }
+# 在假的 gcloud、npx、curl 之下跑；npx（也就是 Zeabur CLI）被叫到的話會記在 $T/calls.log。
+# HOME 換掉：讀不到真的 Zeabur 登入，Python 腳本也就不會連到 Zeabur
+stubbed() { HOME="$T/home" PATH="$T/stub:$PATH" STUB_LOG="$T/calls.log" MIGRATION_WORK="$T/work" "$@"; }
 no_zeabur_calls() {
   if grep -s '^npx' "$T/calls.log"; then echo "the Zeabur CLI was called"; return 1; fi
 }
@@ -316,6 +386,18 @@ layout_cutover_stops_before_zeabur() {
   rm -f "$T/calls.log"
   fails stubbed bash "$T/min/deploy/migrate/cutover.sh" --confirm
   ends 'error: fill in step 3 of verify.sh first'
+  no_zeabur_calls
+}
+# verify.sh 補好之後，cutover.sh 在動到 Zeabur 之前檢查 API；這裡沒有登入，所以停在那裡
+layout_cutover_checks_api() {
+  local d=$T/min/deploy/migrate
+  rm -f "$T/calls.log"
+  cp "$d/verify.sh" "$T/verify.sh.orig"
+  grep -v "^die \"add your project's own checks" "$T/verify.sh.orig" > "$d/verify.sh"
+  fails stubbed bash "$d/cutover.sh" --confirm
+  cp "$T/verify.sh.orig" "$d/verify.sh"
+  has 'no Zeabur login in'
+  ends 'error: the Zeabur API changed or the login expired: see above'
   no_zeabur_calls
 }
 layout_rollback_needs_confirm() {
@@ -472,6 +554,15 @@ for s in $sections; do
       t 'conflicts stop without printing values' unit_conflict
       t 'env_file-unsafe values stop without printing them' unit_env_file_value
       t 'missing KEEP values stop' unit_missing_keep
+      t 'api check reads every Zeabur query' unit_api_sources
+      t 'api check passes on a matching schema' unit_api_matches
+      t 'api check reports missing fields' unit_api_field_gone
+      t 'api check reports missing arguments' unit_api_argument_gone
+      t 'api check covers the CLI mutations' unit_api_cli_mutation_gone
+      t 'api check covers input fields' unit_api_input_gone
+      t 'api check covers variable types' unit_api_type_gone
+      t 'api check reads named queries' unit_api_named_query
+      t 'token and gql blocks are identical' unit_api_shared_blocks
       ;;
     layout)
       layout_setup
@@ -482,6 +573,7 @@ for s in $sections; do
       t 'cutover.sh needs --confirm' layout_cutover_needs_confirm
       t 'cutover.sh rejects a bad FILES_CHECK before Zeabur' layout_cutover_bad_files_check
       t 'cutover.sh stops before Zeabur while verify.sh is unfinished' layout_cutover_stops_before_zeabur
+      t 'cutover.sh checks the Zeabur API before touching Zeabur' layout_cutover_checks_api
       t 'rollback.sh needs --confirm' layout_rollback_needs_confirm
       t 'sync-volume.sh destination guard' layout_volume_destination
       t 'sync-env.sh with no services' layout_sync_env_empty_services

@@ -62,6 +62,17 @@ agent 會：
 - **涵蓋**：由原始碼建置的 Node／Next.js 類 app、Postgres、Redis、MinIO（或其他 S3 相容儲存），搬到單台 VM。其他組合（MySQL／MariaDB、MongoDB、WordPress、Cloud Run、Cloud SQL）`zeabur-discover.py` 會標出來，要自己調整。
 - **驗證程度**：整套流程在一次實際搬遷中跑過；這裡是去識別化之後的版本，唯讀的腳本（盤點、探測、封鎖驗證）都實際跑過。[`tests/run.sh`](tests/run.sh) 檢查語法、shellcheck、Terraform、compose、環境變數的分類，把檔案複製成模擬的使用者專案跑佔位值檢查與設定錯誤時的停止點，並在 Debian、Alpine、Postgres 容器裡實際跑 dump、打包與解開的指令。會改變東西的腳本在去識別化後還沒有對真實服務完整跑過一輪：第一次使用時請在 Phase 3 照常演練兩輪，有問題請回報。
 
+### 最後驗證
+
+| 項目 | 版本 | 日期（UTC） |
+| --- | --- | --- |
+| Zeabur GraphQL API | [`zeabur-api-check.py`](scripts/zeabur-api-check.py) 通過 | 2026-10-24 |
+| Zeabur CLI | 0.24.0（腳本與文件都固定這個版本） | 2026-10-24 |
+| Terraform／google provider | 1.15（本機）與 1.9.8（Docker）／`~> 7.0` | 2026-10-24 |
+| 容器內的指令 | Postgres 16（Debian、Alpine）、Debian 12、Alpine 3.20 | 2026-10-24 |
+
+Zeabur 改版之後先跑 `zeabur-api-check.py`（唯讀）：它從腳本裡的查詢讀出要檢查的欄位，列出哪些不見了、影響哪一支腳本。不過就修查詢、跑 [`tests/run.sh`](tests/run.sh)，再更新這張表。Zeabur CLI 的 `exec`、`variable`、`deploy` 沒辦法這樣檢查：換 CLI 版本時，要在一個測試專案上把這幾個指令實際跑一次。
+
 ## 前置需求
 
 - Zeabur CLI（`npx zeabur@0.24.0`，固定版本）與登入
@@ -99,5 +110,7 @@ A field guide and toolkit for moving a web app from Zeabur to Google Cloud: fron
 - [`scripts/`](scripts/) and [`templates/`](templates/): every script and config used in the migration, sanitized.
 
 Replace every `<...>` with your own values. Scripts that change production say so at the top; rehearse on staging first.
+
+If Zeabur changes its API, [`scripts/zeabur-api-check.py`](scripts/zeabur-api-check.py) (read-only) lists which queries broke; `cutover.sh` runs it before touching Zeabur.
 
 Contributing: run [`tests/run.sh`](tests/run.sh) before opening a PR (needs Docker; it never touches Zeabur or GCP). `main` only accepts pull requests.

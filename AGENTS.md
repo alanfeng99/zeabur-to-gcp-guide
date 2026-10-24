@@ -18,7 +18,9 @@
    - 有：讀它，告訴使用者目前在哪個階段、下一步是什麼、有哪些事等他決定，確認狀態沒變再繼續。
    - 沒有：從 Phase 0 開始，用 [`docs/MIGRATION.template.md`](docs/MIGRATION.template.md) 建一份。
 2. **確認工具與登入**（唯讀）：
-   - `npx zeabur@0.24.0 auth status`：401 就請使用者在**他自己的終端機**跑 `npx zeabur@0.24.0 auth login`（網站登入不會更新 CLI 的 token）。
+   - `npx zeabur@0.24.0 auth status`：401 就請使用者在**自己的終端機**跑 `npx zeabur@0.24.0 auth login`（網站登入不會更新 CLI 的 token）。
+   - `python3 -I <guide>/scripts/zeabur-api-check.py`：腳本用到的 Zeabur API 欄位都還在。不過就停下來告訴使用者：Zeabur 改版了，
+     哪些查詢受影響（它會列出來），這份工具最後驗證的版本見 [README 的「最後驗證」](README.md#最後驗證)。查詢修好之前不要往下做。
    - `gcloud auth list`、`gcloud config list`：記下預設的 project 與 zone，但**所有指令都明確帶 `--project` 與 `--zone`**，不依賴預設值。
    - `terraform version`、`bash --version`、`python3 --version`、`gpg --version`、`pg_restore --version`、`openssl version`；
      用 Cloudflare 時還有 `cloudflared --version`；`gh` 可有可無。
@@ -235,7 +237,7 @@ Zeabur 從某個分支（`ZEABUR_GIT_BRANCH`，discover 會列出）自動部署
 1. 和使用者約時間（避開排程），公告維護時段，定好 rollback 期限與誰有權決定退回。
 2. 切換前一小時內（**每一項都停**）：
    - 把 Zeabur 部署的分支合併進遷移分支 → `sync-env.sh --live`（HOLD 換成正式憑證）→ `release.sh`。
-     `cutover.sh` 會檢查 VM 讀的是最新的 secret、HOLD 已經是正式值。
+     `cutover.sh` 會檢查 VM 讀的是最新的 secret、HOLD 已經是正式值、Zeabur 的 API 還和腳本一致。
    - 有 MinIO：`sync-assets.sh --create-key`。
 3. 使用者在場、明確說開始後：`cutover.sh --confirm`（**停**）。每一步的結果即時告訴使用者。
    **步驟 1 之後失敗**（Zeabur 已暫停、GCP 還在 standby）：不要重跑，立刻問使用者要不要 `rollback.sh --confirm`

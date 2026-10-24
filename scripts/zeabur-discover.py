@@ -15,23 +15,44 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
-TOKEN = next(line.split(':', 1)[1].strip().strip("'").strip('"')
-             for line in open(os.path.expanduser('~/.config/zeabur/cli.yaml'))
-             if line.strip().startswith('token:'))
+
+def zeabur_token():
+    path = os.path.expanduser('~/.config/zeabur/cli.yaml')
+    try:
+        for line in open(path):
+            if line.strip().startswith('token:'):
+                return line.split(':', 1)[1].strip().strip("'").strip('"')
+    except FileNotFoundError:
+        pass
+    sys.exit(f'no Zeabur login in {path}: run npx zeabur@0.24.0 auth login')
+
+
+TOKEN = zeabur_token()
 
 
 def gql(query, variables=None):
     req = urllib.request.Request(
         'https://api.zeabur.com/graphql',
         data=json.dumps({'query': query, 'variables': variables or {}}).encode(),
+        # 預設的 Python User-Agent 會被擋（403）
         headers={'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json',
                  'User-Agent': 'zeabur-to-gcp-guide/1.0'},
     )
-    res = json.load(urllib.request.urlopen(req, timeout=30))
+    try:
+        res = json.load(urllib.request.urlopen(req, timeout=30))
+    except urllib.error.HTTPError as e:
+        # 查詢對不上 schema（欄位、參數、型別不見了）時回 422，原因在 body 的 errors 裡
+        res = json.load(e) if e.code == 422 else {}
+        if not res.get('errors'):
+            sys.exit(f'Zeabur API: HTTP {e.code}' + (' (token expired: run npx zeabur@0.24.0 auth login)' if e.code == 401 else ''))
     if res.get('errors'):
-        sys.exit('Zeabur API error: ' + res['errors'][0].get('message', ''))
+        message = res['errors'][0].get('message', '')
+        # 欄位或參數不見了：Zeabur 改版，zeabur-api-check.py 會列出所有受影響的地方
+        changed = re.search(r'Cannot query field|Unknown argument|Unknown type', message)
+        sys.exit('Zeabur API error: ' + message + (' (the API changed: run zeabur-api-check.py)' if changed else ''))
     return res['data']
 
 
@@ -58,7 +79,7 @@ def mb(n):
 
 def classify(svc):
     """回傳 (類型, 說明)。依 image 判斷；Zeabur 自己建置的 image 是 app。"""
-    ref = ((svc['image'] or {}).get('reference') or '').lower()
+    ref = svc['ref'].lower()
     name = svc['name'].lower()
     keys = {v['key'] for v in svc['variables'] or [] if not v['readonly']}
     if 'registry-oci.zeabur.cloud' in ref or not ref:
@@ -80,7 +101,7 @@ def classify(svc):
 
 
 def pg_major(ref):
-    m = re.search(r'(?:pg|postgres(?:ql)?:)(\d+)', ref or '')
+    m = re.search(r'(?:pg|postgres(?:ql)?:)(\d+)', ref)
     return m.group(1) if m else None
 
 
@@ -101,6 +122,7 @@ def main():
     env = p['environments'][0]['_id']
     services = [dict(gql(SERVICE, {'id': s['_id'], 'env': env})['service'], _id=s['_id']) for s in p['services'] or []]
     for s in services:
+        s['ref'] = (s['image'] or {}).get('reference') or ''
         s['kind'], s['label'] = classify(s)
 
     print(f"# Zeabur 盤點：{p['name']}\n")
@@ -110,7 +132,7 @@ def main():
     print('| 服務 | 類型 | image | 狀態 | 網域 | volume（用量） | Git 自動部署 |')
     print('| --- | --- | --- | --- | --- | --- | --- |')
     for s in services:
-        img = (s['image'] or {}).get('reference') or '-'
+        img = s['ref'] or '-'
         if 'registry-oci.zeabur.cloud' in img:
             img = '（Zeabur 建置）'
         vols = ', '.join(f"`{v['dir']}`（{mb(v['usage'])}）" for v in s['volumes'] or []) or '-'
@@ -125,11 +147,11 @@ def main():
     for s in services:
         k, n = s['kind'], s['name']
         if k == 'postgres':
-            major = pg_major((s['image'] or {}).get('reference'))
+            major = pg_major(s['ref'])
             ok.append(f"{n}：Postgres{' ' + major if major else ''}，用 sync-db.sh 搬；GCP 用同一個 major 版本"
-                      + ('（含 pgvector：image 用 pgvector/pgvector）' if 'pgvector' in (s['image'] or {}).get('reference', '') else ''))
+                      + ('（含 pgvector：image 用 pgvector/pgvector）' if 'pgvector' in s['ref'] else ''))
         elif k == 'redis':
-            ref = (s['image'] or {}).get('reference', '')
+            ref = s['ref']
             ok.append(f'{n}：Redis 不搬資料，排空後在 GCP 重建')
             if 'stack' in ref:
                 adapt.append(f'{n}：image 是 `{ref}`（含 RedisJSON、Search 等模組）。GCP 用同一個 image；它的 entrypoint 不吃 command，'
@@ -151,9 +173,9 @@ def main():
         elif k == 'mongo':
             out.append(f'{n}：MongoDB。不在涵蓋範圍：要改用 mongodump／mongorestore')
         elif k == 'other-data':
-            out.append(f"{n}：{(s['image'] or {}).get('reference')}。不在涵蓋範圍：要自己設計搬移方式")
+            out.append(f"{n}：{s['ref']}。不在涵蓋範圍：要自己設計搬移方式")
         else:
-            adapt.append(f"{n}：直接部署的 image `{(s['image'] or {}).get('reference')}`：放進 compose，確認它有沒有要搬的資料")
+            adapt.append(f"{n}：直接部署的 image `{s['ref']}`：放進 compose，確認它有沒有要搬的資料")
         if s['status'] != 'RUNNING':
             adapt.append(f"{n}：目前狀態是 {s['status']}，確認它還要不要搬")
     custom = [d['domain'] for s in services for d in s['domains'] or [] if not d['domain'].endswith('.zeabur.app')]
